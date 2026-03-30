@@ -1479,21 +1479,23 @@ impl WorkspaceDb {
                 // the pane group is a pane variant, and the buffer is an
                 // unsaved file. However, it might mask an underlying issue
                 // in the workspace or editor deserialization.
-                conn.exec_bound(sql!(
-                    UPDATE workspaces SET paths=NULL WHERE workspace_id=?1 AND paths="";
-                    INSERT INTO pane_groups (workspace_id,parent_group_id,position,axis,flexes)
-                    SELECT ?1,NULL,0,"Horizontal",NULL
-                    WHERE NOT EXISTS (SELECT * FROM pane_groups WHERE workspace_id=?1 LIMIT 1);
-                    UPDATE center_panes
-                    SET parent_group_id=(
-                        SELECT group_id FROM pane_groups
-                        WHERE workspace_id=?1
-                        ORDER BY group_id DESC
-                        LIMIT 1
-                    )
-                    WHERE pane_id IN (SELECT pane_id FROM panes WHERE workspace_id=?1)
-                        AND parent_group_id IS NULL;
-                ))?(workspace.id).context("make sure to save a pane group for the center pane in save workspace")?;
+                if matches!(workspace.center_group, SerializedPaneGroup::Pane(_)) {
+                    conn.exec_bound(sql!(
+                        UPDATE workspaces SET paths=NULL WHERE workspace_id=?1 AND paths="";
+                        INSERT INTO pane_groups (workspace_id,parent_group_id,position,axis,flexes)
+                        SELECT ?1,NULL,0,"Horizontal",NULL
+                        WHERE NOT EXISTS (SELECT * FROM pane_groups WHERE workspace_id=?1 LIMIT 1);
+                        UPDATE center_panes
+                        SET parent_group_id=(
+                            SELECT group_id FROM pane_groups
+                            WHERE workspace_id=?1
+                            ORDER BY group_id DESC
+                            LIMIT 1
+                        )
+                        WHERE pane_id IN (SELECT pane_id FROM panes WHERE workspace_id=?1)
+                            AND parent_group_id IS NULL;
+                    ))?(workspace.id).context("make sure to save a pane group for the center pane in save workspace")?;
+                }
 
                 Ok(())
             })
