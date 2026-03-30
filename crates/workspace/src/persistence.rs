@@ -1326,6 +1326,7 @@ impl WorkspaceDb {
         log::debug!("Saving workspace at location: {:?}", workspace.location);
         self.write(move |conn| {
             conn.with_savepoint("update_worktrees", || {
+                println!("in save_workspace");
                 let remote_connection_id = match workspace.location.clone() {
                     SerializedWorkspaceLocation::Local => None,
                     SerializedWorkspaceLocation::Remote(connection_options) => {
@@ -1335,6 +1336,8 @@ impl WorkspaceDb {
                         )?.0)
                     }
                 };
+
+                println!("remote_connection_id: {:#?}", remote_connection_id);
 
                 // Clear out panes and pane_groups
                 conn.exec_bound(sql!(
@@ -1401,7 +1404,9 @@ impl WorkspaceDb {
                 // Clear out old workspaces with the same paths.
                 // Skip this for empty workspaces - they are identified by workspace_id, not paths.
                 // Multiple empty workspaces with different content should coexist.
+                println!("paths: {:#?}", paths.paths);
                 if !paths.paths.is_empty() {
+                    println!("paths not empty");
                     conn.exec_bound(sql!(
                         DELETE
                         FROM workspaces
@@ -1470,8 +1475,103 @@ impl WorkspaceDb {
                 prepared_query(args).context("Updating workspace")?;
 
                 // Save center pane group
+                println!("center_group: {:#?}", &workspace.center_group);
                 Self::save_pane_group(conn, workspace.id, &workspace.center_group, None)
                     .context("save pane group in save workspace")?;
+
+                println!("workspace.center_group: {:?}", workspace.center_group);
+
+                let workspace_pane_group_count = conn.select_row_bound::<_, i64>(sql!(
+                    SELECT COUNT(1) FROM pane_groups WHERE workspace_id=?
+                ))?(workspace.id)?.unwrap();
+                println!("workspace_pane_group_count: {:?}", workspace_pane_group_count);
+
+                let workspace_pane_groups = conn.select_bound::<_, i64>(sql!(
+                    SELECT * FROM pane_groups WHERE workspace_id=?
+                ))?(workspace.id)?;
+                println!("workspace_pane_groups: {:?}", workspace_pane_groups);
+
+                // mostly working
+                conn.exec_bound(sql!(
+                    UPDATE workspaces SET paths=NULL WHERE workspace_id=?1 AND paths="";
+                    INSERT INTO pane_groups (workspace_id,parent_group_id,position,axis,flexes)
+                    SELECT ?1,NULL,0,"Horizontal",NULL
+                    WHERE NOT EXISTS (SELECT * FROM pane_groups WHERE workspace_id=?1 LIMIT 1);
+                    UPDATE center_panes
+                    SET parent_group_id=(
+                        SELECT group_id FROM pane_groups
+                        WHERE workspace_id=?1
+                        ORDER BY group_id DESC
+                        LIMIT 1
+                    )
+                    WHERE pane_id IN (SELECT pane_id FROM panes WHERE workspace_id=?1)
+                        AND parent_group_id IS NULL;
+                ))?(workspace.id).context("ensuring a pane group for the center pane in the db")?;
+
+
+                // attempt 1
+                // if workspace_pane_groups.is_empty() {
+                //     println!("workspace_pane_groups IS empty");
+                //     // let empty_pane_group = SerializedPaneGroup::Group {
+                //     //     axis: SerializedAxis(Axis::Horizontal),
+                //     //     flexes: None,
+                //     //     children: Vec::new(),
+                //     // };
+                //     let pane_group = SerializedPaneGroup::Group {
+                //         axis: SerializedAxis(Axis::Horizontal),
+                //         flexes: None,
+                //         // children: vec![empty_pane_group],
+                //         children: vec![workspace.center_group.clone()],
+                //     };
+                //     Self::save_pane_group(conn, workspace.id, &pane_group, None)?;
+                //     let workspace_pane_group_ids = conn.select_bound::<_, i64>(sql!(
+                //         SELECT * FROM pane_groups WHERE workspace_id=?
+                //     ))?(workspace.id)?;
+                //     let workspace_pane_group_id = workspace_pane_group_ids.get(0);
+                //     if workspace_pane_group_id.is_some() {
+                //         Self::save_pane_group(conn, workspace.id, &workspace.center_group, Some((workspace_pane_group_id.unwrap().clone(), 0)))
+                //         .context("save pane group in save workspace")?;
+                //     }
+                // }
+                // else {
+                //     println!("workspace_pane_groups is NOT empty");
+                //     // Save center pane group
+                //     println!("center_group: {:#?}", &workspace.center_group);
+                //     Self::save_pane_group(conn, workspace.id, &workspace.center_group, None)
+                //         .context("save pane group in save workspace")?;
+                // }
+
+                // attempt 0
+                // if workspace_pane_group_count < 1 {
+                //     let empty_pane_group = SerializedPaneGroup::Group {
+                //         axis: SerializedAxis(Axis::Horizontal),
+                //         flexes: None,
+                //         children: Vec::new(),
+                //     };
+                //     let pane_group = SerializedPaneGroup::Group {
+                //         axis: SerializedAxis(Axis::Horizontal),
+                //         flexes: None,
+                //         children: vec![empty_pane_group],
+                //     };
+                //     // Self::save_pane_group(conn, workspace_id, &pane_group, parent)?;
+                //     Self::save_pane_group(conn, workspace.id, &pane_group, None)?;
+
+                //     let workspace_pane_group_count = conn.select_row_bound::<_, i64>(sql!(
+                //         SELECT COUNT(1) FROM pane_groups WHERE workspace_id=?
+                //     ))?(workspace.id)?.unwrap();
+                //     println!("new workspace_pane_group_count: {:?}", workspace_pane_group_count);
+
+                //     let q = conn.select_bound::<_, i64>(sql!(
+                //         SELECT * FROM pane_groups WHERE workspace_id=?
+                //     ))?(workspace.id);
+                //     println!("q: {:?}", q);
+                // }
+
+
+
+
+
+                println!("almost ok");
 
                 Ok(())
             })
@@ -1936,6 +2036,7 @@ impl WorkspaceDb {
     }
 
     fn get_center_pane_group(&self, workspace_id: WorkspaceId) -> Result<SerializedPaneGroup> {
+        println!("getting the center pane group");
         Ok(self
             .get_pane_group(workspace_id, None)?
             .into_iter()
@@ -1996,9 +2097,11 @@ impl WorkspaceDb {
         .map(|(group_id, axis, pane_id, active, pinned_count, flexes)| {
             let maybe_pane = maybe!({ Some((pane_id?, active?, pinned_count?)) });
             if let Some((group_id, axis)) = group_id.zip(axis) {
+                println!("got some group before checking flexes");
                 let flexes = flexes
                     .map(|flexes: String| serde_json::from_str::<Vec<f32>>(&flexes))
                     .transpose()?;
+                println!("got some group after checking flexes");
 
                 Ok(SerializedPaneGroup::Group {
                     axis,
@@ -2006,12 +2109,14 @@ impl WorkspaceDb {
                     flexes,
                 })
             } else if let Some((pane_id, active, pinned_count)) = maybe_pane {
+                println!("got some pane");
                 Ok(SerializedPaneGroup::Pane(SerializedPane::new(
                     self.get_items(pane_id)?,
                     active,
                     pinned_count,
                 )))
             } else {
+                println!("bailed out");
                 bail!("Pane Group Child was neither a pane group or a pane");
             }
         })
@@ -2030,7 +2135,9 @@ impl WorkspaceDb {
         pane_group: &SerializedPaneGroup,
         parent: Option<(GroupId, usize)>,
     ) -> Result<()> {
+        println!("in save_pane_group");
         if parent.is_none() {
+            println!("parent is none");
             log::debug!("Saving a pane group for workspace {workspace_id:?}");
         }
         match pane_group {
@@ -2039,7 +2146,9 @@ impl WorkspaceDb {
                 children,
                 flexes,
             } => {
+                println!("is group");
                 let (parent_id, position) = parent.unzip();
+                println!("parent_id: {:#?}", parent_id);
 
                 let flex_string = flexes
                     .as_ref()
@@ -2071,6 +2180,7 @@ impl WorkspaceDb {
                 Ok(())
             }
             SerializedPaneGroup::Pane(pane) => {
+                println!("is pane");
                 Self::save_pane(conn, workspace_id, pane, parent)?;
                 Ok(())
             }
@@ -2097,6 +2207,41 @@ impl WorkspaceDb {
         ))?((pane_id, parent_id, order))?;
 
         Self::save_items(conn, workspace_id, pane_id, &pane.children).context("Saving items")?;
+
+        println!("save_pane sees parent: {:#?}", parent);
+
+        // moved all this to save_workspace
+        // if let Err(_) = self.get_pane_group(workspace_id, Some(parent_id)) {
+        //     println!("inserting a pane group");
+        //     let pane_group = SerializedPaneGroup::Group {
+        //         axis: SerializedAxis(Axis::Horizontal),
+        //         flexes: None,
+        //         children: Vec::new(),
+        //     };
+        //     Self::save_pane_group(conn, workspace_id, &pane_group, Some(parent_id))?;
+        // }
+
+        // let workspace_pane_group_count = conn.select_row_bound::<_, i64>(sql!(
+        //     SELECT COUNT(1) FROM pane_groups WHERE workspace_id=?
+        // ))?(workspace_id)?.unwrap();
+        // println!("workspace_pane_group_count: {:?}", workspace_pane_group_count);
+
+        // if (workspace_pane_group_count < 1) {
+        //     let pane_group = SerializedPaneGroup::Group {
+        //         axis: SerializedAxis(Axis::Horizontal),
+        //         flexes: None,
+        //         // SerializedPaneGroup::Pane(pane)
+        //         children: vec![SerializedPaneGroup::Pane(pane.clone())],
+        //         // children: Vec::new(),
+        //     };
+        //     // Self::save_pane_group(conn, workspace_id, &pane_group, parent)?;
+        //     Self::save_pane_group(conn, workspace_id, &pane_group, None)?;
+
+        //     let workspace_pane_group_count = conn.select_row_bound::<_, i64>(sql!(
+        //         SELECT COUNT(1) FROM pane_groups WHERE workspace_id=?
+        //     ))?(workspace_id)?.unwrap();
+        //     println!("new workspace_pane_group_count: {:?}", workspace_pane_group_count);
+        // }
 
         Ok(pane_id)
     }
